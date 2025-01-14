@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+
+from pyngrok import ngrok, conf
+
+# 1. Set your ngrok auth token (replace with your own token):
+conf.get_default().auth_token = "REPLACE_WITH_YOUR_NGROK_AUTH_TOKEN"
+
+# 2. (Optional) Specify the region ("us", "eu", "ap", etc.):
+conf.get_default().region = "us"
+
+# 3. Open a tunnel on localhost:5001 to your reserved custom domain:
+public_url = ngrok.connect(
+    addr=5001,
+    proto="http",
+    hostname="openai.restapi.ngrok.app"  # Must match the domain reserved in your ngrok dashboard
+)
+
+print("ngrok tunnel is live!")
+print(f"Forwarding: {public_url} -> http://localhost:5001")
+
+# Keep the script running so the tunnel remains open:
+try:
+    print("\nPress Ctrl+C to stop ngrok and exit.")
+    while True:
+        pass
+except KeyboardInterrupt:
+    print("\nShutting down ngrok tunnel...")
+    ngrok.kill()
+    print("Tunnel closed.")
