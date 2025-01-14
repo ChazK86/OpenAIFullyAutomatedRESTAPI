@@ -1,0 +1,872 @@
+from flask import Flask, request, jsonify, send_from_directory, stream_with_context
+import os
+import shutil
+import traceback
+from werkzeug.utils import secure_filename
+from datetime import datetime
+import zipfile
+import json
+import subprocess
+from celery import Celery
+from flask_caching import Cache
+import webbrowser
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+# ----------------------------
+# Configuration
+# ----------------------------
+class Config:
+    UPLOAD_FOLDER = 'uploads'  
+    CELERY_BROKER_URL = 'redis://localhost:6379/0'
+    CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+    CACHE_TYPE = 'simple'
+    LOG_FOLDER = 'logs'
+
+# ----------------------------
+# Initialize Flask app
+# ----------------------------
+app = Flask(__name__)
+app.config.from_object(Config)
+
+# ----------------------------
+# Initialize Celery and Cache
+# ----------------------------
+celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
+cache = Cache(app)
+
+# You may adjust the number of threads if needed
+executor = ThreadPoolExecutor(max_workers=10)
+
+# Ensure the upload and log folders exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['LOG_FOLDER'], exist_ok=True)
+
+# Ensure error log file exists
+error_log_file = 'error_log.json'
+if not os.path.exists(error_log_file):
+    with open(error_log_file, 'w') as f:
+        json.dump([], f)
+
+# ----------------------------
+# Helper Functions
+# ----------------------------
+def allowed_file(filename):
+    ALLOWED_EXTENSIONS = {
+        'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'py', 'js', 'html', 'css', 'java',
+        'cpp', 'c', 'cs', 'h', 'json', 'xml', 'md', 'sh', 'webp', 'tiff', 'bmp', 'docx',
+        'xlsx', 'pptx', 'svg', 'heic'
+    }
+    return (
+        '.' in filename
+        and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    )
+
+def handle_error(message, code, filename=None):
+    error_trace = traceback.format_exc()
+    timestamp = datetime.now().isoformat()
+    error_entry = {
+        "timestamp": timestamp,
+        "error_code": code,
+        "message": message,
+        "traceback": error_trace,
+        "filename": filename
+    }
+    with open(error_log_file, 'r+') as f:
+        error_log = json.load(f)
+        error_log.append(error_entry)
+        f.seek(0)
+        json.dump(error_log, f, indent=4)
+    app.logger.error(
+        f"Error {code}: {message}\nTraceback: {error_trace}\nFilename: {filename}\nTimestamp: {timestamp}"
+    )
+    return (
+        jsonify({"error": message, "code": code, "traceback": error_trace, "filename": filename}),
+        400
+    )
+
+def log_success(message, details=None, filename=None):
+    timestamp = datetime.now().isoformat()
+    success_entry = {
+        "timestamp": timestamp,
+        "message": message,
+        "details": details,
+        "filename": filename
+    }
+    app.logger.info(json.dumps(success_entry, indent=4))
+    return jsonify(success_entry)
+
+def list_directory_contents(directory):
+    result = []
+    for root, dirs, files in os.walk(directory):
+        for name in dirs:
+            result.append({
+                'type': 'directory',
+                'path': os.path.relpath(os.path.join(root, name), app.config['UPLOAD_FOLDER'])
+            })
+        for name in files:
+            result.append({
+                'type': 'file',
+                'path': os.path.relpath(os.path.join(root, name), app.config['UPLOAD_FOLDER'])
+            })
+    return result
+
+def execute_file(filepath):
+    try:
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in {'.py', '.sh'}:
+            # Python or Shell script
+            if ext == '.py':
+                result = subprocess.run(['python', filepath], capture_output=True, text=True)
+            else:
+                result = subprocess.run(['bash', filepath], capture_output=True, text=True)
+
+            if result.returncode == 0:
+                app.logger.info(f"Executed file {filepath} successfully")
+                return result.stdout
+            else:
+                app.logger.error(f"Error executing file {filepath}: {result.stderr}")
+                raise subprocess.CalledProcessError(
+                    result.returncode, result.args, output=result.stdout, stderr=result.stderr
+                )
+
+        elif ext == '.java':
+            # Java source file
+            compile_result = subprocess.run(['javac', filepath], capture_output=True, text=True)
+            if compile_result.returncode != 0:
+                app.logger.error(f"Error compiling Java file {filepath}: {compile_result.stderr}")
+                raise subprocess.CalledProcessError(
+                    compile_result.returncode, compile_result.args,
+                    output=compile_result.stdout, stderr=compile_result.stderr
+                )
+            exec_result = subprocess.run(
+                ['java', os.path.splitext(os.path.basename(filepath))[0]],
+                capture_output=True, text=True
+            )
+            if exec_result.returncode == 0:
+                app.logger.info(f"Executed Java file {filepath} successfully")
+                return exec_result.stdout
+            else:
+                app.logger.error(f"Error executing Java file {filepath}: {exec_result.stderr}")
+                raise subprocess.CalledProcessError(
+                    exec_result.returncode, exec_result.args,
+                    output=exec_result.stdout, stderr=exec_result.stderr
+                )
+
+        elif ext == '.cs':
+            # C# source file
+            compile_result = subprocess.run(['csc', filepath], capture_output=True, text=True)
+            if compile_result.returncode != 0:
+                app.logger.error(f"Error compiling C# file {filepath}: {compile_result.stderr}")
+                raise subprocess.CalledProcessError(
+                    compile_result.returncode, compile_result.args,
+                    output=compile_result.stdout, stderr=compile_result.stderr
+                )
+            exec_filename = os.path.splitext(filepath)[0] + '.exe'
+            exec_result = subprocess.run([exec_filename], capture_output=True, text=True)
+            if exec_result.returncode == 0:
+                app.logger.info(f"Executed C# file {filepath} successfully")
+                return exec_result.stdout
+            else:
+                app.logger.error(f"Error executing C# file {filepath}: {exec_result.stderr}")
+                raise subprocess.CalledProcessError(
+                    exec_result.returncode, exec_result.args,
+                    output=exec_result.stdout, stderr=exec_result.stderr
+                )
+
+        elif ext in {'.cpp', '.c'}:
+            # C++ or C source file
+            output_filename = os.path.splitext(filepath)[0]
+            compile_cmd = ['g++', '-o', output_filename, filepath]
+            compile_result = subprocess.run(compile_cmd, capture_output=True, text=True)
+            if compile_result.returncode != 0:
+                app.logger.error(f"Error compiling C++/C file {filepath}: {compile_result.stderr}")
+                raise subprocess.CalledProcessError(
+                    compile_result.returncode, compile_result.args,
+                    output=compile_result.stdout, stderr=compile_result.stderr
+                )
+            exec_result = subprocess.run([output_filename], capture_output=True, text=True)
+            if exec_result.returncode == 0:
+                app.logger.info(f"Executed C++/C file {filepath} successfully")
+                return exec_result.stdout
+            else:
+                app.logger.error(f"Error executing C++/C file {filepath}: {exec_result.stderr}")
+                raise subprocess.CalledProcessError(
+                    exec_result.returncode, exec_result.args,
+                    output=exec_result.stdout, stderr=exec_result.stderr
+                )
+
+        elif ext in {'.html', '.js', '.css', '.json'}:
+            # Web-related file
+            webbrowser.open(f'file://{os.path.abspath(filepath)}')
+            app.logger.info(f"Opened web file {filepath} in browser")
+            return f"{filepath} opened in web browser"
+
+        elif ext in {'.txt', '.pdf', '.docx', '.xlsx', '.pptx'}:
+            # Document file
+            if os.name == 'nt':
+                os.system(f'start {filepath}')
+            elif os.name == 'posix':
+                os.system(f'open {filepath}')
+            else:
+                os.system(f'xdg-open {filepath}')
+            app.logger.info(f"Opened document file {filepath}")
+            return f"{filepath} opened"
+
+        elif ext in {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.tiff', '.bmp', '.svg', '.heic'}:
+            # Image file
+            if os.name == 'nt':
+                os.system(f'start {filepath}')
+            elif os.name == 'posix':
+                os.system(f'open {filepath}')
+            else:
+                os.system(f'xdg-open {filepath}')
+            app.logger.info(f"Opened image file {filepath}")
+            return f"{filepath} opened"
+
+        else:
+            app.logger.error(f"Execution not supported for {ext} files")
+            raise ValueError(f"Execution not supported for {ext} files")
+
+    except subprocess.CalledProcessError as e:
+        error_message = f"Error executing file: {e.stderr}"
+        app.logger.error(error_message)
+        return error_message
+
+    except Exception as e:
+        error_message = f"Exception occurred: {str(e)}"
+        app.logger.error(error_message)
+        return error_message
+
+# ----------------------------
+# Profiling Middleware
+# ----------------------------
+@app.before_request
+def start_profiling():
+    request.start_time = time.time()
+
+@app.after_request
+def stop_profiling(response):
+    request_time = time.time() - request.start_time
+    app.logger.info(f"Request {request.method} {request.url} took {request_time:.4f} seconds")
+    return response
+
+# ------------------------------------------------------------------------------
+#                           File Management Endpoints
+# ------------------------------------------------------------------------------
+@app.route('/file/upload', methods=['POST'])
+def upload_file():
+    @stream_with_context
+    def generate():
+        if 'file' not in request.files:
+            yield handle_error("No file part in the request", 2001)
+        file = request.files['file']
+        directory = request.form.get('directory', '')
+        if file.filename == '':
+            yield handle_error("No selected file", 2002)
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+            filepath = os.path.join(dir_path, filename)
+            try:
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                file.save(filepath)
+                app.logger.info(f"Uploaded file: {filename} at {filepath}")
+            except IOError as e:
+                yield handle_error(f"Error saving file: {str(e)}", 2005, filename=filename)
+            yield log_success(f"File {filename} uploaded successfully at {filepath}", filename=filename)
+        else:
+            yield handle_error("File type not allowed", 2003)
+
+    return app.response_class(generate(), mimetype='application/json')
+
+@app.route('/file/download/<path:filename>', methods=['GET'])
+def download_file(filename):
+    directory = request.args.get('directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    try:
+        app.logger.info(f"Downloaded file: {filename}")
+        return send_from_directory(dir_path, filename, as_attachment=True)
+    except FileNotFoundError:
+        return handle_error("File not found", 2004, filename=filename)
+
+@app.route('/file/delete/<path:filename>', methods=['DELETE'])
+def delete_file(filename):
+    directory = request.args.get('directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    if os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+            app.logger.info(f"Deleted file: {filename} from {filepath}")
+        except OSError as e:
+            return handle_error(f"Error deleting file: {str(e)}", 2006, filename=filename)
+        return log_success(f"File {filename} deleted successfully", filename=filename)
+    else:
+        return handle_error("File not found", 2004, filename=filename)
+
+@app.route('/file/metadata/<path:filename>', methods=['GET'])
+def get_file_metadata(filename):
+    directory = request.args.get('directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    if os.path.exists(filepath):
+        info = os.stat(filepath)
+        metadata = {
+            'filename': filename,
+            'size': info.st_size,
+            'created': datetime.fromtimestamp(info.st_ctime),
+            'modified': datetime.fromtimestamp(info.st_mtime)
+        }
+        app.logger.info(f"Retrieved metadata for file: {filename}")
+        return jsonify(metadata)
+    else:
+        return handle_error("File not found", 2004, filename=filename)
+
+@app.route('/file/list', methods=['GET'])
+@cache.cached(timeout=60)
+def list_files():
+    directory = request.args.get('directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    files = []
+    for root, dirs, filenames in os.walk(dir_path):
+        for filename in filenames:
+            files.append(os.path.relpath(os.path.join(root, filename), app.config['UPLOAD_FOLDER']))
+    app.logger.info("Listed all files")
+    return jsonify({"files": files})
+
+@app.route('/file/move', methods=['POST'])
+def move_file():
+    data = request.json
+    src = data.get('src')
+    dest = data.get('dest')
+    if not src or not dest:
+        return handle_error("Source and destination paths are required", 4009)
+
+    src_path = os.path.join(app.config['UPLOAD_FOLDER'], src)
+    dest_path = os.path.join(app.config['UPLOAD_FOLDER'], dest)
+    if not os.path.exists(src_path):
+        return handle_error("Source file not found", 2004, filename=src)
+
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.move(src_path, dest_path)
+        app.logger.info(f"Moved file from {src} to {dest}")
+    except IOError as e:
+        return handle_error(f"Error moving file: {str(e)}", 4010, filename=src)
+
+    return log_success(f"File moved from {src} to {dest}", filename=src)
+
+@app.route('/file/rename', methods=['POST'])
+def rename_file():
+    data = request.json
+    src = data.get('src')
+    new_name = data.get('new_name')
+    if not src or not new_name:
+        return handle_error("Source file and new name are required", 4011)
+
+    src_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(src))
+    new_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(new_name))
+    if not os.path.exists(src_path):
+        return handle_error("Source file not found", 2004, filename=src)
+
+    try:
+        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        os.rename(src_path, new_path)
+        app.logger.info(f"Renamed file from {src} to {new_name}")
+    except IOError as e:
+        return handle_error(f"Error renaming file: {str(e)}", 4012, filename=src)
+
+    return log_success(f"File renamed from {src} to {new_name}", filename=src)
+
+@app.route('/file/copy', methods=['POST'])
+def copy_file():
+    data = request.json
+    src = data.get('src')
+    dest = data.get('dest')
+    if not src or not dest:
+        return handle_error("Source and destination paths are required", 4014)
+
+    src_path = os.path.join(app.config['UPLOAD_FOLDER'], src)
+    dest_path = os.path.join(app.config['UPLOAD_FOLDER'], dest)
+    if not os.path.exists(src_path):
+        return handle_error("Source file not found", 2004, filename=src)
+
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.copy2(src_path, dest_path)
+        app.logger.info(f"Copied file from {src} to {dest}")
+    except IOError as e:
+        return handle_error(f"Error copying file: {str(e)}", 4015, filename=src)
+
+    return log_success(f"File copied from {src} to {dest}", filename=src)
+
+@app.route('/file/search', methods=['GET'])
+@cache.cached(timeout=60, query_string=True)
+def search_files():
+    query = request.args.get('query')
+    if not query:
+        return handle_error("Search query is required", 4013)
+
+    files = []
+    for root, dirs, filenames in os.walk(app.config['UPLOAD_FOLDER']):
+        for filename in filenames:
+            if query in filename:
+                files.append(os.path.relpath(os.path.join(root, filename), app.config['UPLOAD_FOLDER']))
+    app.logger.info(f"Searched for files with query: {query}")
+    return jsonify({"files": files})
+
+@app.route('/file/recent', methods=['GET'])
+def recent_files():
+    files = []
+    for root, dirs, filenames in os.walk(app.config['UPLOAD_FOLDER']):
+        for filename in filenames:
+            files.append(os.path.relpath(os.path.join(root, filename), app.config['UPLOAD_FOLDER']))
+    files = sorted(
+        files,
+        key=lambda x: os.path.getctime(os.path.join(app.config['UPLOAD_FOLDER'], x)),
+        reverse=True
+    )
+    app.logger.info("Retrieved recent files")
+    return jsonify({"files": files[:10]})
+
+@app.route('/file/exists/<path:filename>', methods=['GET'])
+def file_exists(filename):
+    directory = request.args.get('directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    exists = os.path.exists(filepath)
+    app.logger.info(f"Checked existence of file: {filename}, exists: {exists}")
+    return jsonify({'exists': exists})
+
+@app.route('/file/size/<path:filename>', methods=['GET'])
+def file_size(filename):
+    directory = request.args.get('directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    if os.path.exists(filepath):
+        size = os.path.getsize(filepath)
+        app.logger.info(f"Retrieved size for file: {filename}, size: {size}")
+        return jsonify({'size': size})
+    else:
+        return handle_error("File not found", 2004, filename=filename)
+
+@app.route('/file/timestamp/<path:filename>', methods=['GET'])
+def file_timestamp(filename):
+    directory = request.args.get('directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    if os.path.exists(filepath):
+        info = os.stat(filepath)
+        timestamps = {
+            'created': datetime.fromtimestamp(info.st_ctime),
+            'modified': datetime.fromtimestamp(info.st_mtime)
+        }
+        app.logger.info(f"Retrieved timestamps for file: {filename}")
+        return jsonify(timestamps)
+    else:
+        return handle_error("File not found", 2004, filename=filename)
+
+@app.route('/file/create', methods=['POST'])
+def create_file():
+    data = request.json
+    filename = data.get('filename')
+    directory = data.get('directory', '')
+    if not filename:
+        return handle_error("Filename is required", 4001)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, secure_filename(filename))
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'w') as file:
+            file.write(data.get('content', ''))
+        app.logger.info(f"Created file: {filename} at {filepath}")
+    except IOError as e:
+        return handle_error(f"Error creating file: {str(e)}", 4002, filename=filename)
+    return log_success(f"File {filename} created successfully at {filepath}", filename=filename)
+
+@app.route('/file/append', methods=['POST'])
+def append_to_file():
+    data = request.json
+    filename = data.get('filename')
+    directory = data.get('directory', '')
+    content = data.get('content')
+    if not filename or not content:
+        return handle_error("Filename and content are required", 4003)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'a') as file:
+            file.write(content)
+        app.logger.info(f"Appended to file: {filename}")
+    except IOError as e:
+        return handle_error(f"Error appending to file: {str(e)}", 4004, filename=filename)
+    return log_success(f"Content appended to file {filename}", filename=filename)
+
+@app.route('/file/replace', methods=['POST'])
+def replace_in_file():
+    data = request.json
+    filename = data.get('filename')
+    directory = data.get('directory', '')
+    content = data.get('content')
+    if not filename or not content:
+        return handle_error("Filename and content are required", 4005)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'w') as file:
+            file.write(content)
+        app.logger.info(f"Replaced content in file: {filename}")
+    except IOError as e:
+        return handle_error(f"Error replacing content in file: {str(e)}", 4006, filename=filename)
+    return log_success(f"Content replaced in file {filename}", filename=filename)
+
+@app.route('/file/read', methods=['GET'])
+def read_file():
+    filename = request.args.get('filename')
+    directory = request.args.get('directory', '')
+    if not filename:
+        return handle_error("Filename is required", 4007)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    if not os.path.exists(filepath):
+        return handle_error("File not found", 2004, filename=filename)
+    try:
+        with open(filepath, 'r') as file:
+            content = file.read()
+        app.logger.info(f"Read file: {filename} at {filepath}")
+        return jsonify({'content': content})
+    except IOError as e:
+        return handle_error(f"Error reading file: {str(e)}", 4008, filename=filename)
+
+@app.route('/file/write-extra-code', methods=['POST'])
+def write_extra_code():
+    data = request.json
+    filename = data.get('filename')
+    directory = data.get('directory', '')
+    code = data.get('code')
+    if not filename or not code:
+        return handle_error("Filename and code are required", 4033)
+
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, secure_filename(filename))
+    if not os.path.exists(filepath):
+        return handle_error("File not found", 2004, filename=filename)
+
+    try:
+        with open(filepath, 'a') as file:
+            file.write('\n' + code)
+        app.logger.info(f"Appended extra code to file: {filename}")
+    except IOError as e:
+        return handle_error(f"Error writing extra code to file: {str(e)}", 4034, filename=filename)
+
+    return log_success(f"Extra code written to file {filename}", filename=filename)
+
+@app.route('/file/lock', methods=['POST'])
+def lock_file():
+    return handle_error("File locking not implemented", 4016)
+
+@app.route('/file/unlock', methods=['POST'])
+def unlock_file():
+    return handle_error("File unlocking not implemented", 4017)
+
+@app.route('/file/permissions', methods=['GET'])
+def get_file_permissions():
+    filename = request.args.get('filename')
+    directory = request.args.get('directory', '')
+    if not filename:
+        return handle_error("Filename is required", 4018)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    try:
+        permissions = os.stat(filepath).st_mode
+        app.logger.info(f"Retrieved permissions for file: {filename}")
+        return jsonify({'permissions': oct(permissions)})
+    except IOError as e:
+        return handle_error(f"Error getting file permissions: {str(e)}", 4019, filename=filename)
+
+@app.route('/file/set-permissions', methods=['POST'])
+def set_file_permissions():
+    data = request.json
+    filename = data.get('filename')
+    directory = data.get('directory', '')
+    permissions = data.get('permissions')
+    if not filename or not permissions:
+        return handle_error("Filename and permissions are required", 4020)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    try:
+        os.chmod(filepath, int(permissions, 8))
+        app.logger.info(f"Set permissions for file: {filename}")
+        return log_success(f"Permissions set for file {filename}", filename=filename)
+    except IOError as e:
+        return handle_error(f"Error setting file permissions: {str(e)}", 4021, filename=filename)
+
+@app.route('/file/compress', methods=['POST'])
+def compress_file():
+    data = request.json
+    filename = data.get('filename')
+    directory = data.get('directory', '')
+    if not filename:
+        return handle_error("Filename is required", 4022)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, filename)
+    if not os.path.exists(filepath):
+        return handle_error("File not found", 2004, filename=filename)
+    zip_filename = f"{filename}.zip"
+    zip_filepath = os.path.join(dir_path, zip_filename)
+    try:
+        with zipfile.ZipFile(zip_filepath, 'w') as zipf:
+            zipf.write(filepath, os.path.basename(filepath))
+        app.logger.info(f"Compressed file: {filename} to {zip_filename}")
+        return log_success(f"File {filename} compressed to {zip_filename}", filename=filename)
+    except IOError as e:
+        return handle_error(f"Error compressing file: {str(e)}", 4023, filename=filename)
+
+@app.route('/file/decompress', methods=['POST'])
+def decompress_file():
+    data = request.json
+    zip_filename = data.get('zip_filename')
+    directory = data.get('directory', '')
+    if not zip_filename:
+        return handle_error("Zip filename is required", 4024)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    zip_filepath = os.path.join(dir_path, secure_filename(zip_filename))
+    if not os.path.exists(zip_filepath):
+        return handle_error("Zip file not found", 4025, filename=zip_filename)
+    try:
+        with zipfile.ZipFile(zip_filepath, 'r') as zipf:
+            zipf.extractall(dir_path)
+        app.logger.info(f"Decompressed file: {zip_filename}")
+        return log_success(f"File {zip_filename} decompressed successfully", filename=zip_filename)
+    except IOError as e:
+        return handle_error(f"Error decompressing file: {str(e)}", 4026, filename=zip_filename)
+
+@app.route('/file/execute', methods=['POST'])
+def execute_file_endpoint():
+    data = request.json
+    filename = data.get('filename')
+    directory = data.get('directory', '')
+    if not filename:
+        return handle_error("Filename is required", 4031)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], directory)
+    filepath = os.path.join(dir_path, secure_filename(filename))
+    if not os.path.exists(filepath):
+        return handle_error("File not found", 2004, filename=filename)
+
+    output = execute_file(filepath)
+    if "Error" in output:
+        return handle_error(output, 4032, filename=filename)
+    else:
+        return log_success(f"Executed file {filename}", details=output, filename=filename)
+
+# ------------------------------------------------------------------------------
+#                        Directory Management Endpoints
+# ------------------------------------------------------------------------------
+@app.route('/directory/create', methods=['POST'])
+def create_directory():
+    data = request.json
+    dir_name = data.get('dir_name')
+    parent_directory = data.get('parent_directory', '')
+    if not dir_name:
+        return handle_error("Directory name is required", 6001)
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(dir_name))
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+        app.logger.info(f"Created directory: {dir_name}")
+        return log_success(f"Directory {dir_name} created successfully", filename=dir_name)
+    except IOError as e:
+        return handle_error(f"Error creating directory: {str(e)}", 6002)
+
+@app.route('/directory/delete/<path:dir_name>', methods=['DELETE'])
+def delete_directory(dir_name):
+    parent_directory = request.args.get('parent_directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(dir_name))
+    if os.path.exists(dir_path) and os.path.isdir(dir_path):
+        try:
+            shutil.rmtree(dir_path)
+            app.logger.info(f"Deleted directory: {dir_name}")
+            return log_success(f"Directory {dir_name} deleted successfully", filename=dir_name)
+        except OSError as e:
+            return handle_error(f"Error deleting directory: {str(e)}", 6003)
+    else:
+        return handle_error("Directory not found", 6004)
+
+@app.route('/directory/size/<path:dir_name>', methods=['GET'])
+def directory_size(dir_name):
+    parent_directory = request.args.get('parent_directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(dir_name))
+    if os.path.exists(dir_path) and os.path.isdir(dir_path):
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(dir_path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                total_size += os.path.getsize(fp)
+        app.logger.info(f"Retrieved size for directory: {dir_name}, size: {total_size}")
+        return jsonify({'size': total_size})
+    else:
+        return handle_error("Directory not found", 6005, filename=dir_name)
+
+@app.route('/directory/recent', methods=['GET'])
+def recent_directories():
+    dirs = [
+        d for d in os.listdir(app.config['UPLOAD_FOLDER'])
+        if os.path.isdir(os.path.join(app.config['UPLOAD_FOLDER'], d))
+    ]
+    dirs = sorted(
+        dirs,
+        key=lambda x: os.path.getctime(os.path.join(app.config['UPLOAD_FOLDER'], x)),
+        reverse=True
+    )
+    app.logger.info("Retrieved recent directories")
+    return jsonify({"directories": dirs[:10]})
+
+@app.route('/directory/exists/<path:dir_name>', methods=['GET'])
+def directory_exists(dir_name):
+    parent_directory = request.args.get('parent_directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(dir_name))
+    exists = os.path.exists(dir_path) and os.path.isdir(dir_path)
+    app.logger.info(f"Checked existence of directory: {dir_name}, exists: {exists}")
+    return jsonify({'exists': exists})
+
+@app.route('/directory/rename', methods=['POST'])
+def rename_directory():
+    data = request.json
+    src = data.get('src')
+    new_name = data.get('new_name')
+    parent_directory = data.get('parent_directory', '')
+    if not src or not new_name:
+        return handle_error("Source directory and new name are required", 6008)
+
+    src_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(src))
+    new_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(new_name))
+    if not os.path.exists(src_path) or not os.path.isdir(src_path):
+        return handle_error("Source directory not found", 6009, filename=src)
+
+    try:
+        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        os.rename(src_path, new_path)
+        app.logger.info(f"Renamed directory from {src} to {new_name}")
+    except IOError as e:
+        return handle_error(f"Error renaming directory: {str(e)}", 6010)
+
+    return log_success(f"Directory renamed from {src} to {new_name}", filename=src)
+
+@app.route('/directory/move', methods=['POST'])
+def move_directory():
+    data = request.json
+    src = data.get('src')
+    dest = data.get('dest')
+    parent_directory = data.get('parent_directory', '')
+    if not src or not dest:
+        return handle_error("Source and destination paths are required", 6011)
+
+    src_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(src))
+    dest_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(dest))
+    if not os.path.exists(src_path) or not os.path.isdir(src_path):
+        return handle_error("Source directory not found", 6013, filename=src)
+
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.move(src_path, dest_path)
+        app.logger.info(f"Moved directory from {src} to {dest}")
+        return log_success(f"Directory moved from {src} to {dest}", filename=src)
+    except IOError as e:
+        return handle_error(f"Error moving directory: {str(e)}", 6014)
+
+@app.route('/directory/copy', methods=['POST'])
+def copy_directory():
+    data = request.json
+    src = data.get('src')
+    dest = data.get('dest')
+    parent_directory = data.get('parent_directory', '')
+    if not src or not dest:
+        return handle_error("Source and destination paths are required", 6012)
+
+    src_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(src))
+    dest_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(dest))
+    if not os.path.exists(src_path) or not os.path.isdir(src_path):
+        return handle_error("Source directory not found", 6013, filename=src)
+
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.copytree(src_path, dest_path)
+        app.logger.info(f"Copied directory from {src} to {dest}")
+        return log_success(f"Directory copied from {src} to {dest}", filename=src)
+    except IOError as e:
+        return handle_error(f"Error copying directory: {str(e)}", 6014, filename=src)
+
+@app.route('/directory/list', methods=['GET'])
+def list_directory():
+    dir_name = request.args.get('dir_name', '')
+    parent_directory = request.args.get('parent_directory', '')
+    dir_path = os.path.join(app.config['UPLOAD_FOLDER'], parent_directory, secure_filename(dir_name))
+    if os.path.exists(dir_path) and os.path.isdir(dir_path):
+        contents = list_directory_contents(dir_path)
+        app.logger.info(f"Listed contents of directory: {dir_name}")
+        return jsonify({"contents": contents})
+    else:
+        return handle_error("Directory not found", 6004, filename=dir_name)
+
+# ------------------------------------------------------------------------------
+#                           Log Reading Endpoints
+# ------------------------------------------------------------------------------
+def read_initial_lines(log_filename, num_lines=100):
+    lines = []
+    try:
+        with open(log_filename, 'r') as file:
+            for _ in range(num_lines):
+                line = file.readline()
+                if not line:
+                    break
+                lines.append(line)
+    except Exception as e:
+        lines.append(f"Error reading file: {e}")
+    return lines
+
+@app.route('/logs', methods=['GET'])
+def list_log_files():
+    log_files = os.listdir(app.config['LOG_FOLDER'])
+    return jsonify({"log_files": log_files})
+
+@app.route('/logs/read', methods=['GET'])
+def read_log_file():
+    filename = request.args.get('filename')
+    num_lines = int(request.args.get('num_lines', 100))
+    if not filename:
+        return handle_error("Filename is required", 5001)
+    filepath = os.path.join(app.config['LOG_FOLDER'], filename)
+    if not os.path.exists(filepath):
+        return handle_error("Log file not found", 5002, filename=filename)
+    initial_lines = read_initial_lines(filepath, num_lines)
+    return jsonify({"log_file": filename, "initial_lines": initial_lines})
+
+# ------------------------------------------------------------------------------
+#                               Celery Tasks
+# ------------------------------------------------------------------------------
+@celery.task
+def long_task():
+    time.sleep(10)  # Simulate a long-running task
+    return "Task completed"
+
+@app.route('/task/start', methods=['POST'])
+def start_long_task():
+    task = long_task.apply_async()
+    app.logger.info(f"Started long task: {task.id}")
+    return jsonify({"task_id": task.id})
+
+@app.route('/task/status/<task_id>', methods=['GET'])
+def task_status(task_id):
+    task = long_task.AsyncResult(task_id)
+    app.logger.info(f"Checked status of task: {task.id}, status: {task.status}")
+    return jsonify({"task_id": task.id, "status": task.status, "result": task.result})
+
+# ------------------------------------------------------------------------------
+#                                   Main
+# ------------------------------------------------------------------------------
+if __name__ == '__main__':
+    # Feel free to change the host or port to suit your needs.
+    app.run(host='0.0.0.0', port=5001)
