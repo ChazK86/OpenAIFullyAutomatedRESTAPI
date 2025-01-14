@@ -1,0 +1,167 @@
+Below is a **step-by-step guide** explaining how to:
+
+1. Create a new **ngrok** account.  
+2. Obtain a **custom domain** (reserved domain) from ngrok.  
+3. Update your **ngrok launcher script** to use that custom domain.  
+4. Update the **OpenAPI (Swagger) JSON** file to reflect your new public URL.
+
+---
+
+## 1. Create a New ngrok Account
+
+1. **Go to [ngrok.com](https://ngrok.com/)** and click **Sign Up** (or **Sign In** if you already have an account).
+2. Follow the prompts to create your ngrok account.  
+3. After you have an account, sign in and go to your ngrok **dashboard**.
+
+---
+
+## 2. Obtain a Custom Domain
+
+A **custom domain** in ngrok’s terminology is often referred to as a **Reserved Domain**. This feature is available on paid ngrok plans. If you are on a free plan, you may not have access to this feature.
+
+1. **Navigate to “Reserved Domains”** in your ngrok dashboard (the URL is typically something like `https://dashboard.ngrok.com/cloud-edge/domains`).
+2. Click **Reserve Domain** (or **New Reserved Domain**).
+3. **Choose a subdomain** (for example, `openai.restapi.ngrok.app`) or use a domain you already own:
+   - If you use your own domain (like `example.com`), you need to configure **DNS** records to point to `*.ngrok.io` or the domain instructions ngrok provides.
+   - If you choose a subdomain of `ngrok.app` or another domain offered by ngrok, you can skip the external DNS step (ngrok handles that for you).
+4. **Complete the reservation**, and ngrok will display your new domain (e.g., `openai.restapi.ngrok.app`).
+
+**Important**: For user-owned custom domains (e.g., `api.my-company.com`), you will have to set up a **CNAME record** in your domain’s DNS pointing to `your-subdomain.ngrok.app`. If using an ngrok-provided domain (`*.ngrok.app`), you don’t need to do this.
+
+---
+
+## 3. Update Your ngrok Launcher Script
+
+Below is an example `ngrok_launcher.py` script that uses **pyngrok** to spin up an HTTP tunnel on port **5001** and bind it to your **reserved domain**. Replace `openai.restapi.ngrok.app` with **your** reserved domain.
+
+```python
+#!/usr/bin/env python3
+
+from pyngrok import ngrok, conf
+
+# 1. Set your ngrok auth token (replace with your own token):
+conf.get_default().auth_token = "REPLACE_WITH_YOUR_NGROK_AUTH_TOKEN"
+
+# 2. (Optional) Specify the region ("us", "eu", "ap", etc.):
+conf.get_default().region = "us"
+
+# 3. Open a tunnel on localhost:5001 to your reserved custom domain:
+public_url = ngrok.connect(
+    addr=5001,
+    proto="http",
+    hostname="openai.restapi.ngrok.app"  # Must match the domain reserved in your ngrok dashboard
+)
+
+print("ngrok tunnel is live!")
+print(f"Forwarding: {public_url} -> http://localhost:5001")
+
+# Keep the script running so the tunnel remains open:
+try:
+    print("\nPress Ctrl+C to stop ngrok and exit.")
+    while True:
+        pass
+except KeyboardInterrupt:
+    print("\nShutting down ngrok tunnel...")
+    ngrok.kill()
+    print("Tunnel closed.")
+```
+
+### Running the Script
+
+1. **Install pyngrok** (and other dependencies):
+   ```bash
+   pip install pyngrok
+   ```
+2. **Start your Flask app** on port `5001`. For example, if your main Flask file is `app.py`:
+   ```bash
+   python app.py
+   ```
+3. **Run the ngrok launcher** in a separate terminal:
+   ```bash
+   python ngrok_launcher.py
+   ```
+4. The script will print the line:
+   ```
+   Forwarding: http://openai.restapi.ngrok.app -> http://localhost:5001
+   ```
+   or a similar HTTPS link. You can now access your Flask app publicly at:
+   ```
+   https://openai.restapi.ngrok.app
+   ```
+
+---
+
+## 4. Update the OpenAPI (Swagger) JSON
+
+Your **OpenAPI specification** can contain a `servers` section indicating where the API is served. Below is a snippet from your provided JSON. Notice the line:
+
+```json
+"servers": [
+  {
+    "url": "https://openai.restapi.ngrok.app",
+    "description": "Public server via ngrok"
+  }
+]
+```
+
+Change `https://openai.restapi.ngrok.app` to **your** custom domain if it’s different. If you followed the preceding steps exactly, you might already have the correct domain.
+
+### Example
+```json
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AI Full Control API",
+    "version": "1.0.0",
+    "description": "OpenAPI specification for 30 essential endpoints giving near-full filesystem control."
+  },
+  "servers": [
+    {
+      "url": "https://openai.restapi.ngrok.app",
+      "description": "Public server via ngrok"
+    }
+  ],
+  ...
+}
+```
+
+- **If** your reserved domain is `mydomain.ngrok.app`, then you’d set:
+  ```json
+  "servers": [
+    {
+      "url": "https://mydomain.ngrok.app",
+      "description": "Public server via ngrok"
+    }
+  ]
+  ```
+  
+Once updated, any **OpenAPI client** or **Swagger UI** that references your OpenAPI definition will now point to your new public endpoint.
+
+---
+
+## 5. Testing & Verifying
+
+1. **Visit your custom domain** in a browser:  
+   `https://openai.restapi.ngrok.app`  
+   You should see your Flask response, or whichever route your app serves by default.
+
+2. **Use an API client** (e.g., [Postman](https://www.postman.com/)) to send a request to your new domain:  
+   ```
+   GET https://openai.restapi.ngrok.app/file/list
+   ```
+   or any other endpoint from your OpenAPI specification.
+
+3. **Check your Flask console** to verify the incoming requests are reaching the server.
+
+That’s it! You now have:
+- An **ngrok** account with a **reserved domain**.
+- A **Flask** app listening on **port 5001**.
+- A **pyngrok** launcher script that **tunnels** your app to your custom domain.
+- An **OpenAPI** spec updated to reference this new public domain.
+
+### Important Notes
+- **DNS** setup is only required if you use a **truly custom domain** (e.g., `api.mycompany.com`). For `*.ngrok.app` subdomains, ngrok automatically handles the DNS.
+- Make sure your **ngrok** plan supports custom domains.  
+- Keep your **auth token** private and **do not** commit it to public repositories.
+
+With these steps, your AI Full Control REST API is publicly reachable at your custom domain via ngrok!
