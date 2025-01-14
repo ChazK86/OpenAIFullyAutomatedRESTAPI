@@ -1,0 +1,19 @@
+import subprocess
+import sys
+
+def install_packages():
+    """
+    Installs all Python packages needed for the Flask application.
+    """
+    packages = [
+        "flask",
+        "celery",
+        "flask_caching",
+        "redis"
+    ]
+
+    for package in packages:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+if __name__ == "__main__":
+    install_packages()
