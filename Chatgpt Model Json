@@ -1,0 +1,973 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AI Full Control API",
+    "version": "1.0.0",
+    "description": "OpenAPI specification for 30 essential endpoints giving near-full filesystem control."
+  },
+  "servers": [
+    {
+      "url": "https://openai.restapi.ngrok.app",
+      "description": "Public server via ngrok"
+    }
+  ],
+  "paths": {
+    "/file/upload": {
+      "post": {
+        "operationId": "uploadFile",
+        "summary": "Upload a file",
+        "description": "Uploads a file to the server, optionally specifying a directory.",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "directory": {
+                    "type": "string",
+                    "description": "Optional directory path in which to place the file."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "File uploaded successfully."
+          }
+        }
+      }
+    },
+    "/file/download/{filename}": {
+      "get": {
+        "operationId": "downloadFile",
+        "summary": "Download a file",
+        "description": "Downloads a specified file as an attachment. Optional directory query parameter.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "description": "Directory path containing the file."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File download successful."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/delete/{filename}": {
+      "delete": {
+        "operationId": "deleteFile",
+        "summary": "Delete a file",
+        "description": "Deletes a file from the server.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "description": "Directory path containing the file."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File deleted successfully."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/metadata/{filename}": {
+      "get": {
+        "operationId": "getFileMetadata",
+        "summary": "Get file metadata",
+        "description": "Retrieves file size, creation time, and modification time.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File metadata retrieved."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/list": {
+      "get": {
+        "operationId": "listFiles",
+        "summary": "List files",
+        "description": "Lists all files (recursively) in an optional directory.",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A JSON array of files."
+          }
+        }
+      }
+    },
+    "/file/move": {
+      "post": {
+        "operationId": "moveFile",
+        "summary": "Move a file",
+        "description": "Moves a file from src to dest.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "src": {
+                    "type": "string"
+                  },
+                  "dest": {
+                    "type": "string"
+                  }
+                },
+                "required": ["src", "dest"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File moved successfully."
+          }
+        }
+      }
+    },
+    "/file/rename": {
+      "post": {
+        "operationId": "renameFile",
+        "summary": "Rename a file",
+        "description": "Renames a file from src to new_name.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "src": {
+                    "type": "string"
+                  },
+                  "new_name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["src", "new_name"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File renamed successfully."
+          }
+        }
+      }
+    },
+    "/file/copy": {
+      "post": {
+        "operationId": "copyFile",
+        "summary": "Copy a file",
+        "description": "Copies a file from src to dest.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "src": {
+                    "type": "string"
+                  },
+                  "dest": {
+                    "type": "string"
+                  }
+                },
+                "required": ["src", "dest"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File copied successfully."
+          }
+        }
+      }
+    },
+    "/file/search": {
+      "get": {
+        "operationId": "searchFiles",
+        "summary": "Search files",
+        "description": "Searches for files containing the query in their name.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Search keyword."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of matching filenames."
+          }
+        }
+      }
+    },
+    "/file/exists/{filename}": {
+      "get": {
+        "operationId": "fileExists",
+        "summary": "Check file existence",
+        "description": "Checks if a file exists in the optional directory.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns a JSON indicating existence."
+          }
+        }
+      }
+    },
+    "/file/size/{filename}": {
+      "get": {
+        "operationId": "getFileSize",
+        "summary": "Get file size",
+        "description": "Returns file size in bytes.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File size retrieved."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/timestamp/{filename}": {
+      "get": {
+        "operationId": "getFileTimestamps",
+        "summary": "Get file timestamps",
+        "description": "Retrieves file creation and modification timestamps.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Timestamps retrieved."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/create": {
+      "post": {
+        "operationId": "createFile",
+        "summary": "Create a file",
+        "description": "Creates a new file with optional content.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": ["filename"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File created successfully."
+          }
+        }
+      }
+    },
+    "/file/append": {
+      "post": {
+        "operationId": "appendFile",
+        "summary": "Append to file",
+        "description": "Appends content to an existing file.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": ["filename", "content"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Content appended successfully."
+          }
+        }
+      }
+    },
+    "/file/replace": {
+      "post": {
+        "operationId": "replaceFile",
+        "summary": "Replace file content",
+        "description": "Overwrites the entire file content.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": ["filename", "content"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File content replaced successfully."
+          }
+        }
+      }
+    },
+    "/file/read": {
+      "get": {
+        "operationId": "readFile",
+        "summary": "Read a file",
+        "description": "Returns the text content of a file.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File content returned."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/write-extra-code": {
+      "post": {
+        "operationId": "writeExtraCode",
+        "summary": "Append extra code/text",
+        "description": "Appends extra code/text to an existing file.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": ["filename", "code"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Code appended successfully."
+          }
+        }
+      }
+    },
+    "/file/permissions": {
+      "get": {
+        "operationId": "getFilePermissions",
+        "summary": "Get file permissions",
+        "description": "Retrieves file permissions in octal format.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Permissions retrieved."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/set-permissions": {
+      "post": {
+        "operationId": "setFilePermissions",
+        "summary": "Set file permissions",
+        "description": "Sets file permissions (octal).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  },
+                  "permissions": {
+                    "type": "string",
+                    "description": "Octal string (e.g. '0755')"
+                  }
+                },
+                "required": ["filename", "permissions"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Permissions set successfully."
+          }
+        }
+      }
+    },
+    "/file/compress": {
+      "post": {
+        "operationId": "compressFile",
+        "summary": "Compress a file",
+        "description": "Zips a file into a .zip archive.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  }
+                },
+                "required": ["filename"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File compressed successfully."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+    "/file/decompress": {
+      "post": {
+        "operationId": "decompressFile",
+        "summary": "Decompress a file",
+        "description": "Extracts a .zip file into the specified directory.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "zip_filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  }
+                },
+                "required": ["zip_filename"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File decompressed successfully."
+          },
+          "404": {
+            "description": "Zip file not found."
+          }
+        }
+      }
+    },
+    "/file/execute": {
+      "post": {
+        "operationId": "executeFile",
+        "summary": "Execute a file",
+        "description": "Executes or opens a file (e.g. .py, .sh, .java, .cpp).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  }
+                },
+                "required": ["filename"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File executed successfully, output returned if available."
+          },
+          "404": {
+            "description": "File not found."
+          }
+        }
+      }
+    },
+
+    "/directory/create": {
+      "post": {
+        "operationId": "createDirectory",
+        "summary": "Create a directory",
+        "description": "Creates a new directory inside the specified parent directory.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "dir_name": {
+                    "type": "string"
+                  },
+                  "parent_directory": {
+                    "type": "string"
+                  }
+                },
+                "required": ["dir_name"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Directory created successfully."
+          }
+        }
+      }
+    },
+    "/directory/delete/{dir_name}": {
+      "delete": {
+        "operationId": "deleteDirectory",
+        "summary": "Delete a directory",
+        "description": "Deletes a directory and all its contents.",
+        "parameters": [
+          {
+            "name": "dir_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "parent_directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory deleted successfully."
+          },
+          "404": {
+            "description": "Directory not found."
+          }
+        }
+      }
+    },
+    "/directory/size/{dir_name}": {
+      "get": {
+        "operationId": "getDirectorySize",
+        "summary": "Get directory size",
+        "description": "Retrieves the total size of all files within a directory (recursively).",
+        "parameters": [
+          {
+            "name": "dir_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "parent_directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory size returned."
+          },
+          "404": {
+            "description": "Directory not found."
+          }
+        }
+      }
+    },
+    "/directory/exists/{dir_name}": {
+      "get": {
+        "operationId": "directoryExists",
+        "summary": "Check directory existence",
+        "description": "Checks if the directory exists.",
+        "parameters": [
+          {
+            "name": "dir_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "parent_directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns a JSON indicating existence."
+          }
+        }
+      }
+    },
+    "/directory/rename": {
+      "post": {
+        "operationId": "renameDirectory",
+        "summary": "Rename a directory",
+        "description": "Renames a directory from src to new_name.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "src": {
+                    "type": "string"
+                  },
+                  "new_name": {
+                    "type": "string"
+                  },
+                  "parent_directory": {
+                    "type": "string"
+                  }
+                },
+                "required": ["src", "new_name"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Directory renamed successfully."
+          }
+        }
+      }
+    },
+    "/directory/move": {
+      "post": {
+        "operationId": "moveDirectory",
+        "summary": "Move a directory",
+        "description": "Moves a directory from src to dest within a parent directory (optional).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "src": {
+                    "type": "string"
+                  },
+                  "dest": {
+                    "type": "string"
+                  },
+                  "parent_directory": {
+                    "type": "string"
+                  }
+                },
+                "required": ["src", "dest"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Directory moved successfully."
+          }
+        }
+      }
+    },
+    "/directory/copy": {
+      "post": {
+        "operationId": "copyDirectory",
+        "summary": "Copy a directory",
+        "description": "Copies a directory (recursively) from src to dest within a parent directory (optional).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "src": {
+                    "type": "string"
+                  },
+                  "dest": {
+                    "type": "string"
+                  },
+                  "parent_directory": {
+                    "type": "string"
+                  }
+                },
+                "required": ["src", "dest"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Directory copied successfully."
+          }
+        }
+      }
+    },
+    "/directory/list": {
+      "get": {
+        "operationId": "listDirectory",
+        "summary": "List directory contents",
+        "description": "Lists files and subdirectories within the specified directory.",
+        "parameters": [
+          {
+            "name": "dir_name",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "parent_directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory contents returned."
+          },
+          "404": {
+            "description": "Directory not found."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {}
+  }
+}
