@@ -1,0 +1,1060 @@
+# total_fs_control_enhanced.py
+import os
+import shutil
+import zipfile
+import subprocess
+import time
+import traceback
+import logging
+import stat
+
+from flask import Flask, request, send_file, jsonify, make_response
+from werkzeug.utils import secure_filename
+
+###############################################################################
+# CONFIGURATION
+###############################################################################
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(name)s - %(message)s'
+)
+logger = logging.getLogger("TotalFileSystemControlAPI")
+
+# ---------------------------------------------------------------------------
+# HARD-CODE the 'uploads' folder path you desire, ignoring the script location:
+# ---------------------------------------------------------------------------
+UPLOADS_ROOT = r"C:\Users\Chaz\Downloads\Xiaohongshu\API\uploads"
+
+# Ensure the folder exists
+if not os.path.isdir(UPLOADS_ROOT):
+    os.makedirs(UPLOADS_ROOT, exist_ok=True)
+    logger.debug(f"Created the uploads folder at: {UPLOADS_ROOT}")
+
+app = Flask(__name__)
+
+###############################################################################
+# HELPER FUNCTIONS
+###############################################################################
+
+def make_response_message(status, message, **extras):
+    """
+    Creates a standardized JSON response with a "status" and "message".
+    Optionally attach extra data as key/value pairs.
+    """
+    base = {
+        "status": status,
+        "message": message
+    }
+    base.update(extras)
+    return jsonify(base)
+
+def restricted_join(*segments):
+    """
+    Safely join path segments under UPLOADS_ROOT. 
+    1. We apply secure_filename to each segment.
+    2. We join them under UPLOADS_ROOT.
+    3. We then resolve the absolute path and ensure it starts with UPLOADS_ROOT.
+       (Case-insensitive check for Windows.)
+    If the path tries to break out of the Uploads folder, we return None.
+    """
+    safe_parts = [secure_filename(s) for s in segments if s]
+    candidate = os.path.join(UPLOADS_ROOT, *safe_parts)
+    resolved = os.path.realpath(candidate)
+
+    # On Windows, compare lowercase forms of both paths to avoid mismatch
+    uploads_root_norm = os.path.realpath(UPLOADS_ROOT).lower().rstrip("\\/")
+    resolved_norm = resolved.lower().rstrip("\\/")
+
+    if not resolved_norm.startswith(uploads_root_norm):
+        # Attempted path traversal outside of Uploads
+        return None
+    return resolved
+
+def handle_unexpected_exception(e):
+    """
+    Catch unexpected exceptions, log them, and return a 500 JSON response
+    with partial traceback (for debugging).
+    """
+    tb = traceback.format_exc()
+    logger.error(f"Unexpected Error: {str(e)}\n{tb}")
+    return make_response_message("error", str(e), traceback=tb), 500
+
+def set_ownership_and_perms(full_path, data):
+    """
+    Helper function to optionally set ownership (uid/gid) and
+    permissions (octal) after creation or modification of a file/dir.
+    Only works if you run as root or have appropriate permissions on Linux.
+    (Likely a no-op on Windows unless further specialized.)
+    """
+    # Ownership
+    user_id = data.get("owner")   # can be int or None
+    group_id = data.get("group")  # can be int or None
+    if user_id is not None or group_id is not None:
+        uid = int(user_id) if user_id is not None else -1
+        gid = int(group_id) if group_id is not None else -1
+        os.chown(full_path, uid, gid)
+        logger.debug(f"Set ownership of {full_path} to UID={uid}, GID={gid}")
+
+    # Permissions
+    perms = data.get("permissions")  # string octal, e.g. "0755"
+    if perms:
+        perm_int = int(perms, 8)
+        os.chmod(full_path, perm_int)
+        logger.debug(f"Set permissions of {full_path} to {perms}")
+
+###############################################################################
+# FILE ROUTES (Operations restricted to UPLOADS folder)
+###############################################################################
+
+@app.route("/file/upload", methods=["POST"])
+def upload_file():
+    """
+    POST /file/upload
+    Upload a file (multipart) into the Uploads folder, optionally specifying
+    a subdirectory, as well as ownership/permissions in form fields if wanted.
+    """
+    try:
+        if "file" not in request.files:
+            return make_response_message("error", "No file part in the request"), 400
+
+        uploaded_file = request.files["file"]
+        directory = request.form.get("directory", "")  # subdir under Uploads
+        if not uploaded_file.filename:
+            return make_response_message("error", "No filename provided"), 400
+
+        filename = secure_filename(uploaded_file.filename)
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        uploaded_file.save(full_path)
+
+        # Ownership & perms from form
+        data = {
+            "owner": request.form.get("owner"),
+            "group": request.form.get("group"),
+            "permissions": request.form.get("permissions")
+        }
+        set_ownership_and_perms(full_path, data)
+
+        logger.debug(f"Uploaded file to: {full_path}")
+        return make_response_message("success", "File uploaded successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/download/<path:filename>", methods=["GET"])
+def download_file(filename):
+    """
+    GET /file/download/<filename>
+    Restricted to the Uploads folder.
+    """
+    try:
+        directory = request.args.get("directory", "")
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        if not os.path.isfile(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        logger.debug(f"Serving download for {full_path}")
+        return send_file(full_path, as_attachment=True)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/delete/<path:filename>", methods=["DELETE"])
+def delete_file(filename):
+    """
+    DELETE /file/delete/<filename>
+    Remove a file (not directory) under Uploads.
+    """
+    try:
+        directory = request.args.get("directory", "")
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        if os.path.isdir(full_path) and not os.path.islink(full_path):
+            return make_response_message("error", "Path is a directory."), 400
+
+        os.remove(full_path)
+        logger.debug(f"Deleted file: {full_path}")
+        return make_response_message("success", "File deleted successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/metadata/<path:filename>", methods=["GET"])
+def get_file_metadata(filename):
+    """
+    GET /file/metadata/<filename>
+    Retrieves file size, creation time, modification time, ownership, etc.
+    """
+    try:
+        directory = request.args.get("directory", "")
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        stat_info = os.stat(full_path)
+        response = {
+            "absolute_path": os.path.abspath(full_path),
+            "size": stat_info.st_size,
+            "creation_time": time.ctime(stat_info.st_ctime),
+            "modification_time": time.ctime(stat_info.st_mtime),
+            "owner_uid": stat_info.st_uid,
+            "owner_gid": stat_info.st_gid,
+            "mode_octal": oct(stat_info.st_mode & 0o777)
+        }
+        return jsonify(response)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/list", methods=["GET"])
+def list_files():
+    """
+    GET /file/list
+    Recursively list all files in a subdirectory under Uploads (or Uploads root if none).
+    """
+    try:
+        directory = request.args.get("directory", "")
+        full_path = restricted_join(directory)
+        if not full_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        if not os.path.isdir(full_path):
+            # If it doesn't exist or is a file, just return an empty list
+            return jsonify({"file_count": 0, "files": []})
+
+        file_list = []
+        for root, dirs, files in os.walk(full_path):
+            for f in files:
+                # Calculate a relative path from the 'Uploads' root
+                absolute = os.path.join(root, f)
+                file_list.append(os.path.relpath(absolute, UPLOADS_ROOT))
+
+        logger.debug(f"Listed {len(file_list)} files under {full_path}")
+        return jsonify({"file_count": len(file_list), "files": file_list})
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/move", methods=["POST"])
+def move_file():
+    """
+    POST /file/move
+    Moves a file within the Uploads folder from src to dest.
+    Optional 'force' param to overwrite existing dest, plus ownership/perms.
+    """
+    try:
+        data = request.get_json() or {}
+        src = data.get("src")
+        dest = data.get("dest")
+        force = data.get("force", False)
+
+        if not src or not dest:
+            return make_response_message("error", "src and dest are required"), 400
+
+        src_path = restricted_join(src)
+        dest_path = restricted_join(dest)
+        if not src_path or not dest_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        if not os.path.exists(src_path):
+            return make_response_message("error", "Source path not found."), 404
+
+        # Overwrite if force
+        if force and os.path.exists(dest_path):
+            if os.path.isdir(dest_path) and not os.path.islink(dest_path):
+                shutil.rmtree(dest_path)
+            else:
+                os.remove(dest_path)
+
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.move(src_path, dest_path)
+
+        set_ownership_and_perms(dest_path, data)
+        logger.debug(f"Moved file from {src_path} to {dest_path}")
+        return make_response_message("success", "File moved successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/rename", methods=["POST"])
+def rename_file():
+    """
+    POST /file/rename
+    Similar to move, but specifically renames within the same directory.
+    """
+    try:
+        data = request.get_json() or {}
+        src = data.get("src")
+        new_name = data.get("new_name")
+        if not src or not new_name:
+            return make_response_message("error", "src and new_name are required"), 400
+
+        src_path = restricted_join(src)
+        if not src_path:
+            return make_response_message("error", "Invalid source path; must stay under 'Uploads'."), 400
+
+        if not os.path.exists(src_path):
+            return make_response_message("error", "Source file not found."), 404
+
+        directory = os.path.dirname(src_path)
+        dest_path = restricted_join(os.path.relpath(directory, UPLOADS_ROOT), new_name)
+        if not dest_path:
+            return make_response_message("error", "Invalid new path; must stay under 'Uploads'."), 400
+
+        shutil.move(src_path, dest_path)
+        set_ownership_and_perms(dest_path, data)
+
+        logger.debug(f"Renamed file {src_path} to {dest_path}")
+        return make_response_message("success", "File renamed successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/copy", methods=["POST"])
+def copy_file():
+    """
+    POST /file/copy
+    Copies a file within the Uploads folder.
+    """
+    try:
+        data = request.get_json() or {}
+        src = data.get("src")
+        dest = data.get("dest")
+        force = data.get("force", False)
+
+        if not src or not dest:
+            return make_response_message("error", "src and dest are required"), 400
+
+        src_path = restricted_join(src)
+        dest_path = restricted_join(dest)
+        if not src_path or not dest_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        if not os.path.exists(src_path):
+            return make_response_message("error", "Source file not found."), 404
+
+        if force and os.path.exists(dest_path):
+            if os.path.isdir(dest_path) and not os.path.islink(dest_path):
+                shutil.rmtree(dest_path)
+            else:
+                os.remove(dest_path)
+
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.copy2(src_path, dest_path)
+
+        set_ownership_and_perms(dest_path, data)
+        logger.debug(f"Copied file {src_path} to {dest_path}")
+        return make_response_message("success", "File copied successfully.", source=src, destination=dest)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/search", methods=["GET"])
+def search_files():
+    """
+    GET /file/search
+    Searches files by name under the entire Uploads folder.
+    Optional 'case_insensitive' param.
+    """
+    try:
+        query = request.args.get("query", "")
+        case_insensitive = request.args.get("case_insensitive", "false").lower() == "true"
+
+        results = []
+        for root, dirs, files in os.walk(UPLOADS_ROOT):
+            for f in files:
+                check_name = f.lower() if case_insensitive else f
+                seek = query.lower() if case_insensitive else query
+                if seek in check_name:
+                    # Return the path relative to 'Uploads'
+                    absolute = os.path.join(root, f)
+                    rel_to_uploads = os.path.relpath(absolute, UPLOADS_ROOT)
+                    results.append(rel_to_uploads)
+
+        logger.debug(f"Search for '{query}' returned {len(results)} results.")
+        return jsonify({
+            "query": query,
+            "total_matches": len(results),
+            "results": results
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/exists/<path:filename>", methods=["GET"])
+def file_exists(filename):
+    """
+    GET /file/exists/<filename>
+    Checks if a file exists under Uploads.
+    """
+    try:
+        directory = request.args.get("directory", "")
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return jsonify({"exists": False, "error": "Invalid path"}), 400
+
+        exists = os.path.exists(full_path)
+        return jsonify({
+            "exists": exists,
+            "absolute_path": os.path.abspath(full_path) if exists else None
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/size/<path:filename>", methods=["GET"])
+def get_file_size(filename):
+    """
+    GET /file/size/<filename>
+    Returns file size in bytes if under Uploads and is a file.
+    """
+    try:
+        directory = request.args.get("directory", "")
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path) or os.path.isdir(full_path):
+            return make_response_message("error", "File not found (or it's a directory)."), 404
+
+        size = os.path.getsize(full_path)
+        return jsonify({"size": size, "filename": filename})
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/timestamp/<path:filename>", methods=["GET"])
+def get_file_timestamps(filename):
+    """
+    GET /file/timestamp/<filename>
+    Gets creation/modification timestamps for a file under Uploads.
+    """
+    try:
+        directory = request.args.get("directory", "")
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        stat_info = os.stat(full_path)
+        return jsonify({
+            "filename": filename,
+            "creation_time_str": time.ctime(stat_info.st_ctime),
+            "modification_time_str": time.ctime(stat_info.st_mtime),
+            "creation_time_epoch": stat_info.st_ctime,
+            "modification_time_epoch": stat_info.st_mtime
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/create", methods=["POST"])
+def create_file():
+    """
+    POST /file/create
+    Creates a file (or symlink/fifo/device) under Uploads.
+    """
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        directory = data.get("directory", "")
+        node_type = data.get("node_type", "file").lower()
+        if not filename:
+            return make_response_message("error", "filename is required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path; must stay under 'Uploads'."), 400
+
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        # node creation
+        if node_type == "file":
+            content = data.get("content", "")
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+        elif node_type == "symlink":
+            target = data.get("target")
+            if not target:
+                return make_response_message("error", "target is required for symlink"), 400
+            if os.path.exists(full_path):
+                os.remove(full_path)
+            os.symlink(target, full_path)
+
+        elif node_type in ("fifo", "char", "block"):
+            if node_type == "fifo":
+                mode = stat.S_IFIFO
+                major_num = 0
+                minor_num = 0
+            else:
+                major_num = data.get("major")
+                minor_num = data.get("minor")
+                if major_num is None or minor_num is None:
+                    return make_response_message("error", "major and minor required for char/block"), 400
+                major_num = int(major_num)
+                minor_num = int(minor_num)
+                mode = stat.S_IFCHR if node_type == "char" else stat.S_IFBLK
+
+            perms_str = data.get("permissions", "0666")
+            perm_int = int(perms_str, 8)
+            device = os.makedev(major_num, minor_num) if node_type in ("char", "block") else 0
+
+            if os.path.exists(full_path):
+                os.remove(full_path)
+            os.mknod(full_path, mode | perm_int, device)
+        else:
+            return make_response_message("error", f"Unknown node_type '{node_type}'."), 400
+
+        set_ownership_and_perms(full_path, data)
+        logger.debug(f"Created {node_type} node: {full_path}")
+        return make_response_message("success", f"{node_type.capitalize()} created successfully.", path=full_path)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/append", methods=["POST"])
+def append_file():
+    """
+    POST /file/append
+    Appends text to an existing file under Uploads.
+    """
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        directory = data.get("directory", "")
+        content = data.get("content", None)
+        if not filename or content is None:
+            return make_response_message("error", "filename and content are required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        with open(full_path, "a", encoding="utf-8") as f:
+            f.write(content)
+
+        set_ownership_and_perms(full_path, data)
+        logger.debug(f"Appended content to {full_path}")
+        return make_response_message("success", "Content appended successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/replace", methods=["POST"])
+def replace_file():
+    """
+    POST /file/replace
+    Overwrites the entire file content, if it’s a normal file under Uploads.
+    """
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        directory = data.get("directory", "")
+        content = data.get("content")
+
+        if not filename or content is None:
+            return make_response_message("error", "filename and content are required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        # Disallow replace on symlink or device nodes
+        file_stat = os.stat(full_path)
+        if os.path.islink(full_path) or stat.S_ISCHR(file_stat.st_mode) or stat.S_ISBLK(file_stat.st_mode):
+            return make_response_message("error", "Cannot replace content of a symlink or device."), 400
+
+        old_size = os.path.getsize(full_path)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        new_size = len(content)
+        set_ownership_and_perms(full_path, data)
+
+        logger.debug(f"Replaced content in {full_path}")
+        return make_response_message("success", "File content replaced successfully.",
+                                     old_size=old_size, new_size=new_size)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/read", methods=["GET"])
+def read_file():
+    """
+    GET /file/read
+    Reads text content from a file under Uploads. 
+    """
+    try:
+        filename = request.args.get("filename")
+        directory = request.args.get("directory", "")
+        if not filename:
+            return make_response_message("error", "filename is required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        logger.debug(f"Read {len(content)} characters from {full_path}")
+        return jsonify({"content": content, "length": len(content)})
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/write-extra-code", methods=["POST"])
+def write_extra_code():
+    """
+    POST /file/write-extra-code
+    Appends code/text to an existing file under Uploads.
+    """
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        directory = data.get("directory", "")
+        code = data.get("code")
+
+        if not filename or code is None:
+            return make_response_message("error", "filename and code are required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        with open(full_path, "a", encoding="utf-8") as f:
+            f.write(code)
+
+        set_ownership_and_perms(full_path, data)
+        logger.debug(f"Appended code to {full_path}")
+        return make_response_message("success", "Code appended successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/permissions", methods=["GET"])
+def get_file_permissions():
+    """
+    GET /file/permissions
+    Retrieves ownership and permissions of a file under Uploads.
+    """
+    try:
+        filename = request.args.get("filename")
+        directory = request.args.get("directory", "")
+        if not filename:
+            return make_response_message("error", "filename is required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        s = os.stat(full_path)
+        mode = s.st_mode & 0o777
+        return jsonify({
+            "filename": filename,
+            "permissions_octal": oct(mode),
+            "permissions_int": mode,
+            "owner_uid": s.st_uid,
+            "owner_gid": s.st_gid
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/set-permissions", methods=["POST"])
+def set_file_permissions():
+    """
+    POST /file/set-permissions
+    Allows setting or changing ownership/permissions on a file under Uploads.
+    """
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        directory = data.get("directory", "")
+
+        if not filename:
+            return make_response_message("error", "filename is required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        set_ownership_and_perms(full_path, data)
+        return make_response_message("success", "Permissions/ownership set successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/compress", methods=["POST"])
+def compress_file():
+    """
+    POST /file/compress
+    Creates a .zip of a file in Uploads. 
+    """
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        directory = data.get("directory", "")
+
+        if not filename:
+            return make_response_message("error", "filename is required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        zip_filename = f"{full_path}.zip"
+        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.write(full_path, arcname=os.path.basename(full_path))
+
+        logger.debug(f"Compressed {full_path} into {zip_filename}")
+        return make_response_message("success", "File compressed successfully.", zip_path=zip_filename)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/decompress", methods=["POST"])
+def decompress_file():
+    """
+    POST /file/decompress
+    Extract a .zip within the Uploads folder or specified subdirectory.
+    """
+    try:
+        data = request.get_json() or {}
+        zip_filename = data.get("zip_filename")
+        directory = data.get("directory", "")
+
+        if not zip_filename:
+            return make_response_message("error", "zip_filename is required"), 400
+
+        zip_full_path = restricted_join(directory, zip_filename)
+        if not zip_full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(zip_full_path):
+            return make_response_message("error", "Zip file not found."), 404
+
+        extract_dir = os.path.dirname(zip_full_path) or UPLOADS_ROOT
+        with zipfile.ZipFile(zip_full_path, 'r') as zf:
+            extracted_files = zf.namelist()
+            zf.extractall(path=extract_dir)
+
+        logger.debug(f"Decompressed {zip_full_path} into {extract_dir}")
+        return make_response_message("success", "File decompressed successfully",
+                                     extracted_files=extracted_files)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/file/execute", methods=["POST"])
+def execute_file():
+    """
+    POST /file/execute
+    Executes a file if it exists in Uploads and is executable.
+    """
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        directory = data.get("directory", "")
+        if not filename:
+            return make_response_message("error", "filename is required"), 400
+
+        full_path = restricted_join(directory, filename)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.exists(full_path):
+            return make_response_message("error", "File not found."), 404
+
+        logger.debug(f"Executing {full_path}")
+        result = subprocess.run([full_path], capture_output=True, text=True, shell=True)
+
+        return jsonify({
+            "status": "success" if result.returncode == 0 else "failure",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+###############################################################################
+# DIRECTORY ROUTES (Restricted to UPLOADS folder)
+###############################################################################
+
+@app.route("/directory/create", methods=["POST"])
+def create_directory():
+    """
+    POST /directory/create
+    Create a subdirectory under Uploads. 
+    """
+    try:
+        data = request.get_json() or {}
+        dir_name = data.get("dir_name")
+        parent_directory = data.get("parent_directory", "")
+        if not dir_name:
+            return make_response_message("error", "dir_name is required"), 400
+
+        full_path = restricted_join(parent_directory, dir_name)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        os.makedirs(full_path, exist_ok=True)
+        set_ownership_and_perms(full_path, data)
+
+        logger.debug(f"Created directory: {full_path}")
+        return make_response_message("success", "Directory created successfully.", directory=full_path)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/directory/delete/<path:dir_name>", methods=["DELETE"])
+def delete_directory(dir_name):
+    """
+    DELETE /directory/delete/<dir_name>
+    Delete a subdirectory of Uploads and all its contents.
+    """
+    try:
+        parent_directory = request.args.get("parent_directory", "")
+        full_path = restricted_join(parent_directory, dir_name)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.isdir(full_path) and not os.path.islink(full_path):
+            return make_response_message("error", "Directory not found."), 404
+
+        shutil.rmtree(full_path)
+        logger.debug(f"Deleted directory: {full_path}")
+        return make_response_message("success", "Directory deleted successfully.")
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/directory/size/<path:dir_name>", methods=["GET"])
+def get_directory_size(dir_name):
+    """
+    GET /directory/size/<dir_name>
+    Calculate total size of all files in a subdirectory of Uploads.
+    """
+    try:
+        parent_directory = request.args.get("parent_directory", "")
+        full_path = restricted_join(parent_directory, dir_name)
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.isdir(full_path) and not os.path.islink(full_path):
+            return make_response_message("error", "Directory not found."), 404
+
+        total_size = 0
+        file_count = 0
+        for root, dirs, files in os.walk(full_path):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    total_size += os.path.getsize(fp)
+                    file_count += 1
+                except Exception:
+                    pass
+
+        logger.debug(f"Calculated size of {full_path}: {total_size} bytes, {file_count} files total.")
+        return jsonify({
+            "directory": full_path,
+            "total_size_bytes": total_size,
+            "file_count": file_count
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/directory/exists/<path:dir_name>", methods=["GET"])
+def directory_exists(dir_name):
+    """
+    GET /directory/exists/<dir_name>
+    Check if a subdirectory in Uploads exists.
+    """
+    try:
+        parent_directory = request.args.get("parent_directory", "")
+        full_path = restricted_join(parent_directory, dir_name)
+        if not full_path:
+            return jsonify({"exists": False, "error": "Invalid path"}), 400
+
+        existence = os.path.isdir(full_path)
+        logger.debug(f"Check dir existence of {full_path}: {existence}")
+        return jsonify({
+            "exists": existence,
+            "absolute_path": os.path.abspath(full_path) if existence else None
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/directory/rename", methods=["POST"])
+def rename_directory():
+    """
+    POST /directory/rename
+    Rename a subdirectory under Uploads. Optionally set ownership/perms after rename.
+    """
+    try:
+        data = request.get_json() or {}
+        src = data.get("src")
+        new_name = data.get("new_name")
+        parent_directory = data.get("parent_directory", "")
+        if not src or not new_name:
+            return make_response_message("error", "src and new_name are required"), 400
+
+        old_path = restricted_join(parent_directory, src)
+        if not old_path:
+            return make_response_message("error", "Invalid src path."), 400
+
+        if not os.path.isdir(old_path) and not os.path.islink(old_path):
+            return make_response_message("error", "Source directory not found."), 404
+
+        new_path = restricted_join(parent_directory, new_name)
+        if not new_path:
+            return make_response_message("error", "Invalid new path."), 400
+
+        shutil.move(old_path, new_path)
+        set_ownership_and_perms(new_path, data)
+
+        logger.debug(f"Renamed directory from {old_path} to {new_path}")
+        return make_response_message("success", "Directory renamed successfully.",
+                                     old_path=old_path, new_path=new_path)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/directory/move", methods=["POST"])
+def move_directory():
+    """
+    POST /directory/move
+    Move a subdirectory within Uploads. Optionally 'force' to overwrite destination,
+    and set ownership/perms after moving.
+    """
+    try:
+        data = request.get_json() or {}
+        src = data.get("src")
+        dest = data.get("dest")
+        parent_directory = data.get("parent_directory", "")
+        force = data.get("force", False)
+        if not src or not dest:
+            return make_response_message("error", "src and dest are required"), 400
+
+        old_path = restricted_join(parent_directory, src)
+        new_path = restricted_join(parent_directory, dest)
+        if not old_path or not new_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.isdir(old_path) and not os.path.islink(old_path):
+            return make_response_message("error", "Source directory not found."), 404
+
+        if force and os.path.exists(new_path):
+            shutil.rmtree(new_path)
+
+        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        shutil.move(old_path, new_path)
+
+        set_ownership_and_perms(new_path, data)
+        logger.debug(f"Moved directory from {old_path} to {new_path}")
+        return make_response_message("success", "Directory moved successfully.",
+                                     old_path=old_path, new_path=new_path)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/directory/copy", methods=["POST"])
+def copy_directory():
+    """
+    POST /directory/copy
+    Copies a subdirectory within Uploads (recursively). Optionally 'force' to overwrite 
+    destination and set ownership/perms after copying.
+    """
+    try:
+        data = request.get_json() or {}
+        src = data.get("src")
+        dest = data.get("dest")
+        parent_directory = data.get("parent_directory", "")
+        force = data.get("force", False)
+        if not src or not dest:
+            return make_response_message("error", "src and dest are required"), 400
+
+        old_path = restricted_join(parent_directory, src)
+        new_path = restricted_join(parent_directory, dest)
+        if not old_path or not new_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.isdir(old_path) and not os.path.islink(old_path):
+            return make_response_message("error", "Source directory not found."), 404
+
+        if force and os.path.exists(new_path):
+            shutil.rmtree(new_path)
+
+        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        shutil.copytree(old_path, new_path)
+
+        set_ownership_and_perms(new_path, data)
+        logger.debug(f"Copied directory from {old_path} to {new_path}")
+        return make_response_message("success", "Directory copied successfully.",
+                                     old_path=old_path, new_path=new_path)
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+@app.route("/directory/list", methods=["GET"])
+def list_directory():
+    """
+    GET /directory/list
+    Lists files and subdirectories in a given subdirectory of Uploads.
+    """
+    try:
+        dir_name = request.args.get("dir_name", "")
+        parent_directory = request.args.get("parent_directory", "")
+        # Build the path
+        if dir_name:
+            full_path = restricted_join(parent_directory, dir_name)
+        else:
+            full_path = restricted_join(parent_directory)
+
+        if not full_path:
+            return make_response_message("error", "Invalid path."), 400
+
+        if not os.path.isdir(full_path) and not os.path.islink(full_path):
+            return make_response_message("error", "Directory not found."), 404
+
+        files = []
+        directories = []
+        with os.scandir(full_path) as it:
+            for entry in it:
+                if entry.is_file() or entry.is_symlink():
+                    files.append(entry.name)
+                elif entry.is_dir():
+                    directories.append(entry.name)
+
+        logger.debug(f"Listed directory {full_path}: {len(files)} files, {len(directories)} dirs.")
+        return jsonify({
+            "directory": os.path.abspath(full_path),
+            "files": files,
+            "file_count": len(files),
+            "directories": directories,
+            "directory_count": len(directories)
+        })
+    except Exception as e:
+        return handle_unexpected_exception(e)
+
+###############################################################################
+# MAIN ENTRY POINT
+###############################################################################
+
+if __name__ == "__main__":
+    # We run with debug on, no security or rate limiting.
+    # All operations restricted to the absolute folder you specified above.
+    app.run(debug=True, host="0.0.0.0", port=5000)
